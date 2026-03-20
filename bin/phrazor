@@ -1,0 +1,259 @@
+#!/usr/bin/env php
+<?php
+
+use phrazor\Scanner\Config;
+use phrazor\Scanner\Scanner;
+use phrazor\Scanner\ScanResult;
+use phrazor\Scanner\LocaleResult;
+use phrazor\Scanner\ExtractedPattern;
+
+// Autoload
+$autoloaders = [
+    __DIR__ . '/../vendor/autoload.php', // running from source
+    __DIR__ . '/../../../autoload.php',  // running as a dependency
+];
+
+$loaded = false;
+foreach ($autoloaders as $autoloader) {
+    if (is_file($autoloader)) {
+        require $autoloader;
+        $loaded = true;
+        break;
+    }
+}
+
+if (!$loaded) {
+    fwrite(STDERR, "phrazor: Could not find autoloader. Run 'composer install' first.\n");
+    exit(1);
+}
+
+// -------------------------------------------------------------------------
+// Parse argv
+// -------------------------------------------------------------------------
+
+$command = $argv[1] ?? null;
+
+if ($command === null || in_array($command, ['-h', '--help', 'help'], true)) {
+    echo usage();
+    exit(0);
+}
+
+if ($command !== 'scan') {
+    fwrite(STDERR, "phrazor: Unknown command '{$command}'. Run 'phrazor --help' for usage.\n");
+    exit(1);
+}
+
+// Parse flags
+$flags = parseFlags(array_slice($argv, 2));
+
+if (isset($flags['help'])) {
+    echo usage();
+    exit(0);
+}
+
+// -------------------------------------------------------------------------
+// Load config
+// -------------------------------------------------------------------------
+
+try {
+    if (isset($flags['config'])) {
+        $config = Config::fromFile($flags['config']);
+    } else {
+        $config = Config::discover();
+    }
+
+    // Apply CLI overrides
+    $overrides = [];
+
+    if (isset($flags['source']))           $overrides['source']          = explode(',', $flags['source']);
+    if (isset($flags['locale']))           $overrides['locales']         = explode(',', $flags['locale']);
+    if (isset($flags['functions']))        $overrides['functions']       = explode(',', $flags['functions']);
+    if (isset($flags['i18n-path']))        $overrides['i18n_path']       = $flags['i18n-path'];
+    if (isset($flags['removed']))          $overrides['removed']         = $flags['removed'];
+    if (isset($flags['new-keys']))         $overrides['new_keys']        = $flags['new-keys'];
+    if (isset($flags['output']))           $overrides['output']          = $flags['output'];
+    if (isset($flags['on-syntax-error']))  $overrides['on_syntax_error'] = $flags['on-syntax-error'];
+    if (isset($flags['sort']))             $overrides['sort']            = true;
+    if (isset($flags['identity']))         $overrides['identity']        = true;
+
+    if ($overrides !== []) {
+        $config = $config->withOverrides($overrides);
+    }
+} catch (\RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
+
+// -------------------------------------------------------------------------
+// Run
+// -------------------------------------------------------------------------
+
+// FIX: read $output after overrides are applied so --output=verbose|silent
+// is honoured rather than always using the config-file default.
+$output = $config->output;
+
+try {
+    $scanner = new Scanner($config);
+    $result  = $scanner->run();
+} catch (\RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
+
+// -------------------------------------------------------------------------
+// Output
+// -------------------------------------------------------------------------
+
+if ($output === 'silent') {
+    exit(0);
+}
+
+$isVerbose = $output === 'verbose';
+
+// Skipped patterns
+if ($result->skippedCount() > 0) {
+    foreach ($result->skipped as $skipped) {
+        /** @var ExtractedPattern $skipped */
+        warn("Skipped dynamic pattern in {$skipped->file}:{$skipped->line} ({$skipped->function}(...))");
+    }
+    echo "\n";
+}
+
+// Per-locale results
+foreach ($result->localeResults as $lr) {
+    /** @var LocaleResult $lr */
+
+    $action = $lr->existed ? 'updated' : 'created';
+
+    if ($lr->diff->isEmpty()) {
+        if ($isVerbose) {
+            line("  {$lr->locale}  no changes");
+        }
+        continue;
+    }
+
+    line("  {$lr->locale}  {$action}");
+
+    if ($isVerbose) {
+        if ($lr->diff->newCount() > 0) {
+            line("    + {$lr->diff->newCount()} new");
+            foreach ($lr->diff->new as $pattern) {
+                line("      " . summarize($pattern));
+            }
+        }
+
+        if ($lr->diff->removedCount() > 0) {
+            line("    - {$lr->diff->removedCount()} removed");
+            foreach ($lr->diff->removed as $pattern) {
+                line("      " . summarize($pattern));
+            }
+        }
+    } else {
+        $parts = [];
+        if ($lr->diff->newCount() > 0)     $parts[] = "+{$lr->diff->newCount()} new";
+        if ($lr->diff->removedCount() > 0) $parts[] = "-{$lr->diff->removedCount()} removed";
+        line("    " . implode('  ', $parts));
+    }
+}
+
+echo "\n";
+
+// Summary line
+$totalNew     = array_sum(array_map(fn(LocaleResult $lr) => $lr->diff->newCount(),     $result->localeResults));
+$totalRemoved = array_sum(array_map(fn(LocaleResult $lr) => $lr->diff->removedCount(), $result->localeResults));
+$totalSkipped = $result->skippedCount();
+
+$summary = [
+    "{$result->files} files scanned",
+    "{$result->patternCount()} patterns found",
+];
+
+if ($totalNew > 0)     $summary[] = "+{$totalNew} new";
+if ($totalRemoved > 0) $summary[] = "-{$totalRemoved} removed";
+if ($totalSkipped > 0) $summary[] = "{$totalSkipped} skipped";
+
+line(implode('  ·  ', $summary));
+
+exit(0);
+
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+
+function line(string $text): void
+{
+    echo $text . "\n";
+}
+
+function warn(string $text): void
+{
+    fwrite(STDERR, "warning: {$text}\n");
+}
+
+function summarize(string $pattern, int $max = 60): string
+{
+    $pattern = str_replace("\n", '\n', $pattern);
+    if (mb_strlen($pattern) > $max) {
+        return mb_substr($pattern, 0, $max - 1) . '…';
+    }
+    return $pattern;
+}
+
+/**
+ * Parse --flag=value and --flag argv into an associative array.
+ *
+ * @return array<string, string|true>
+ */
+function parseFlags(array $args): array
+{
+    $flags = [];
+
+    foreach ($args as $arg) {
+        if (!str_starts_with($arg, '--')) {
+            fwrite(STDERR, "phrazor: Unexpected argument: {$arg}\n");
+            exit(1);
+        }
+
+        $arg = substr($arg, 2);
+
+        if (str_contains($arg, '=')) {
+            [$key, $value] = explode('=', $arg, 2);
+            $flags[$key]   = $value;
+        } else {
+            $flags[$arg] = true;
+        }
+    }
+
+    return $flags;
+}
+
+function usage(): string
+{
+    return <<<'EOT'
+phrazor — i18n scanner
+
+Usage:
+  vendor/bin/phrazor scan [options]
+
+Options:
+  --config=PATH           Path to config file (default: phrazor.php in cwd)
+  --source=DIR,...        Comma-separated source directories to scan
+  --locale=LOCALE,...     Comma-separated locales to update (e.g. fr_FR,de_DE)
+  --functions=NAMES,...   Comma-separated function names to scan for (e.g. t,_,trans)
+  --i18n-path=PATH        Path to i18n directory
+  --removed=MODE          How to handle removed keys: comment, delete, keep (default: comment)
+  --new-keys=MODE         Where to place new keys: bottom, top, sort (default: bottom)
+  --sort                  Sort entire locale file after update
+  --identity              Write identity mappings for new keys (key => key)
+  --output=MODE           Output verbosity: summary, verbose, silent (default: summary)
+  --on-syntax-error=MODE  How to handle locale file syntax errors: error, warn, skip (default: error)
+  --help                  Show this help
+
+Examples:
+  vendor/bin/phrazor scan
+  vendor/bin/phrazor scan --locale=fr_FR,de_DE --output=verbose
+  vendor/bin/phrazor scan --source=src/,templates/ --identity
+  vendor/bin/phrazor scan --config=config/phrazor.php
+
+EOT;
+}
