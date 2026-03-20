@@ -1,0 +1,31 @@
+{
+    "name": "cr0w/phrazor",
+    "description": "Minimal gettext-style i18n with ICU message formatting.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.2",
+        "ext-intl": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "files": [
+            "src/t.php",
+            "src/aliases.php"
+        ],
+        "psr-4": {
+            "phrazor\\": "src/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "bin": [
+        "bin/phrazor"
+    ],
+    "config": {
+        "sort-packages": true
+    }
+}
