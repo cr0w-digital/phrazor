@@ -201,7 +201,8 @@ vendor/bin/phrazor scan --sort
 With `--identity` off (default), new keys are written as TODO comments:
 
 ```php
-// TODO: 'Hello, {name}' => '',
+// TODO: translate
+'Hello, {name}' => '',
 ```
 
 With `--identity` on, identity mappings are written directly:
